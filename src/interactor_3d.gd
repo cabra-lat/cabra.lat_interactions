@@ -14,6 +14,7 @@ signal throwed_grabbable(body: Grabbable3D)
 signal dropped_grabbable(body: Grabbable3D)
 
 @export var follow: Node3D
+@export var Cursor: Cursor3D
 @export var available_slots: Array[Marker3D] = []
 @export var max_mass: float = 10.0
 @export var max_grabbables: int = 1
@@ -26,33 +27,31 @@ signal dropped_grabbable(body: Grabbable3D)
 @export var interact_action: String = "interact"
 @export var inspect_action:  String = "inspect"
 
-@onready var Cursor: Cursor3D = $Cursor3D
-
 var active_grabbables: Array[ActiveGrabbable] = []
 var focused_interactable: Interactable3D = null
 var focused_grabbable: Grabbable3D = null
 
 func _ready() -> void:
 	_prepare_slots()
-	Cursor.hide()
+	if Cursor: Cursor.hide()
 	
 func _physics_process(_delta) -> void:
 	global_transform = follow.global_transform
 	if not active_grabbables.is_empty():
-		Cursor.change_cursor("closed_hand") # Keep hand closed while pulling
+		if Cursor: Cursor.change_cursor("closed_hand") # Keep hand closed while pulling
 		return
 	
 	var detected = get_collider()
 	_unfocus_previous(detected)
 
 	if detected is Grabbable3D:
-		Cursor.change_cursor(detected.focus_cursor_name)
+		if Cursor: Cursor.change_cursor(detected.focus_cursor_name)
 		focused_grabbable = detected as Grabbable3D
 		focused_grabbable.focus()
 		return
 
 	if detected is Interactable3D:
-		Cursor.change_cursor(detected.focus_cursor_name)
+		if Cursor: Cursor.change_cursor(detected.focus_cursor_name)
 		focused_interactable = detected as Interactable3D
 		focused_interactable.focus()
 		return
@@ -66,7 +65,7 @@ func _unfocus_previous(detected):
 		focused_interactable = null
 
 func _input(event: InputEvent) -> void:
-	Cursor.timer.start()
+	if Cursor: Cursor.timer.start()
 
 	if event is InputEventMouseButton:
 		var direction = Vector3.UP
@@ -84,20 +83,20 @@ func _input(event: InputEvent) -> void:
 		handle_interact()
 	
 	if Input.is_action_just_pressed(throw_action):
-		Cursor.change_cursor("open_hand").out_then_in()
+		if Cursor: Cursor.change_cursor("open_hand").out_then_in()
 		handle_throw()
 
 	# The drop action
 	if Input.is_action_just_pressed(drop_action):
-		Cursor.change_cursor("open_hand").reset_scale()
+		if Cursor: Cursor.change_cursor("open_hand").reset_scale()
 		handle_drop()
 		
 	if Input.is_action_just_pressed(pull_action):
-		Cursor.change_cursor("closed_hand").in_then_out()
+		if Cursor: Cursor.change_cursor("closed_hand").in_then_out()
 		handle_pull()
 
 	if Input.is_action_just_released(pull_action):
-		Cursor.change_cursor("open_hand").reset_scale()
+		if Cursor: Cursor.change_cursor("open_hand").reset_scale()
 
 func handle_inspect(amount: float, direction: Vector3 = Vector3.UP) -> void:
 	if focused_grabbable and is_instance_valid(focused_grabbable):
@@ -107,7 +106,7 @@ func handle_inspect(amount: float, direction: Vector3 = Vector3.UP) -> void:
 func handle_interact() -> void:
 	if focused_interactable and is_instance_valid(focused_interactable):
 		if focused_interactable.can_be_interacted:
-			Cursor.change_cursor("pointing_hand").click()
+			if Cursor: Cursor.change_cursor("pointing_hand").click()
 		focused_interactable.interact()
 
 func handle_pull() -> void:

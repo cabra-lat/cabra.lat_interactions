@@ -1,7 +1,6 @@
-[gd_scene load_steps=3 format=3 uid="uid://c6mfjk8v5pslc"]
+[gd_scene load_steps=2 format=3 uid="uid://c6mfjk8v5pslc"]
 
-[ext_resource type="Script" uid="uid://bvk1dkletoyjf" path="res://addons/cabra.lat_interactions/src/interactor_3d.gd" id="1_6xywk"]
-[ext_resource type="PackedScene" uid="uid://8x85dbyhhwva" path="res://addons/cabra.lat_cursor/cursor_3d.tscn" id="2_xvyiv"]
+[ext_resource type="Script" uid="uid://0caxxkephjek" path="res://addons/cabra.lat_interactions/src/interactor_3d.gd" id="1_6xywk"]
 
 [node name="Interactor3D" type="RayCast3D"]
 transform = Transform3D(0.998363, -1.45519e-11, 4.65661e-10, -4.00178e-11, 0.998363, -2.56784e-05, -1.62981e-09, 2.56747e-05, 0.998363, 0, 0, 0)
@@ -9,9 +8,3 @@ target_position = Vector3(0, 0, -4)
 collision_mask = 7
 collide_with_areas = true
 script = ExtResource("1_6xywk")
-
-[node name="Marker3D" type="Marker3D" parent="."]
-transform = Transform3D(1, -3.27418e-11, -6.0536e-09, -7.27594e-12, 0.999999, 1.49012e-08, 2.79397e-09, -1.49012e-08, 0.999999, 0, 0, -1)
-
-[node name="Cursor3D" parent="." instance=ExtResource("2_xvyiv")]
-position = Vector2(160, 120)

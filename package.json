@@ -1,0 +1,27 @@
+{
+  "name": "@cabra-lat/interactions",
+  "version": "1.0.0",
+  "description": "An addon for simple 3D interactions.",
+  "keywords": [
+    "godot",
+    "godot-engine"
+  ],
+  "homepage": "https://github.com/cabra-lat/cabra.lat_interactions#readme",
+  "bugs": {
+    "url": "https://github.com/cabra-lat/cabra.lat_interactions/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cabra-lat/cabra.lat_interactions.git"
+  },
+  "license": "MIT",
+  "author": "Cabra Lat",
+  "type": "commonjs",
+  "main": "plugin.gd",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}
