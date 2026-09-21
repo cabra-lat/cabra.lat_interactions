@@ -36,6 +36,7 @@ func _ready() -> void:
   if Cursor: Cursor.hide()
 
 func _physics_process(_delta) -> void:
+  if not follow: return
   global_transform = follow.global_transform
   if not active_grabbables.is_empty():
     if Cursor: Cursor.change_cursor("closed_hand") # Keep hand closed while pulling

@@ -7,7 +7,6 @@ class_name Grabbable3D extends RigidBody3D
 
 const GROUP_NAME: String = "grabbable-3d"
 
-enum GrabMode { PULL, IN_PLACE }
 enum OutlineMode { EDGE_SHADER, INVERTED_HULL }
 enum AttachmentMode { SPRING, FIXED }
 
@@ -17,14 +16,13 @@ signal interaction(grabbable: Grabbable3D, action: String)
 @export_group("References")
 @export var grabbable_mesh: MeshInstance3D
 ## The main mesh instance that represents this grabbable object
-@export var grab_points: Array[Marker3D] = []
+@export var grab_points: Array[Node3D] = []
 ## Array of grab points where the object can be grabbed from
-@export var attractors: Array[Marker3D] = []
+@export var grab_point_weights: Array[int] = []
+## Integer weights for each grab point (will be normalized internally)
+@export var attractors: Array[Node3D] = []
 ## Array of attractor points that guide the object during grabbing
-
 @export_group("Settings")
-@export var grab_mode: GrabMode = GrabMode.PULL
-## The method used to grab this object (pull towards hand or keep in place)
 @export var focus_cursor_name: String = 'open_hand'
 ## The cursor name to show when this object is focused
 @export var should_reset_on_drop: bool = false
@@ -84,42 +82,30 @@ signal interaction(grabbable: Grabbable3D, action: String)
 ## Color of the outline when focused
 
 var initial_transform: Transform3D
-## The initial transform of the object for reset purposes
 var outline_material: StandardMaterial3D
-## Material used for inverted hull outlines
 var outline_shader_material: ShaderMaterial
-## Material used for edge shader outlines
 var is_grabbed: bool = false
-## Whether the object is currently being grabbed
 var is_attached: bool = false
-## Whether the object is permanently attached to an attractor
 
 # Custom physics state
 var custom_linear_velocity: Vector3 = Vector3.ZERO
-## Custom linear velocity used for physics calculations in m/s
 var custom_angular_velocity: Vector3 = Vector3.ZERO
-## Custom angular velocity used for physics calculations in rad/s
 var custom_transform: Transform3D
-## Custom transform used for physics calculations
 
 # Anti-jitter measures
 var position_error_integral: Vector3 = Vector3.ZERO
-## Integral term for position error accumulation
 var rotation_error_integral: Vector3 = Vector3.ZERO
-## Integral term for rotation error accumulation
 var last_position: Vector3 = Vector3.ZERO
-## Previous frame position for interpolation
 var last_rotation: Basis = Basis.IDENTITY
-## Previous frame rotation for interpolation
 
 # Attachment tracking
 var attachment_timer: float = 0.0
-## Timer tracking how long the object has been within attachment thresholds
 var attachment_offset: Transform3D
-## Transform offset between object and attractor when attached
+
+# Normalized weights cache
+var _normalized_weights: Array[float] = []
 
 func _ready() -> void:
-  ## Initializes the grabbable object, setting up materials, physics, and signals.
   initial_transform = global_transform
   custom_transform = global_transform
   custom_linear_velocity = linear_velocity
@@ -130,15 +116,15 @@ func _ready() -> void:
   add_to_group(GROUP_NAME)
   interaction.connect(_on_interaction)
 
+  _normalize_weights()
+
   print("[%s] Grabbable3D ready - Attachment mode: %s" % [name, attachment_mode])
 
 func _physics_process(delta: float) -> void:
-  ## Processes physics for grabbed objects each physics frame.
   if is_grabbed:
     _custom_physics_process(delta)
 
 func _custom_physics_process(delta: float) -> void:
-  ## Handles custom physics processing for grabbed objects.
   # Store previous state for interpolation
   last_position = custom_transform.origin
   last_rotation = custom_transform.basis
@@ -147,20 +133,13 @@ func _custom_physics_process(delta: float) -> void:
   _update_attachment_state(delta)
 
   if is_attached:
-    # When attached, follow the target based on attachment mode
-    if attachment_mode == AttachmentMode.FIXED:
-      _apply_fixed_attachment_physics(delta)
-    else:
-      _apply_spring_attachment_physics(delta)
+    _apply_attachment_physics(delta)
   else:
     # Custom physics integration
     _custom_integrate_forces(delta)
 
-    # Apply spring forces
-    if attractors.size() == 1:
-      _apply_single_attractor_physics(delta)
-    elif attractors.size() >= 1 and grab_points.size() >= 1:
-      _apply_multi_point_physics(delta)
+    # Apply spring forces based on configuration
+    _apply_spring_physics(delta)
 
     # Apply resting thresholds
     _apply_resting_thresholds()
@@ -173,20 +152,21 @@ func _custom_physics_process(delta: float) -> void:
   linear_velocity = custom_linear_velocity
   angular_velocity = custom_angular_velocity
 
-func _apply_fixed_attachment_physics(_delta: float) -> void:
-  ## Applies fixed attachment physics where object directly follows attractor.
+func _apply_attachment_physics(delta: float) -> void:
   if attractors.is_empty():
     return
 
   var attractor = attractors[0]
 
-  # Direct transform following with offset - like a child node
-  custom_transform = attractor.global_transform * attachment_offset
-  custom_linear_velocity = Vector3.ZERO
-  custom_angular_velocity = Vector3.ZERO
+  if attachment_mode == AttachmentMode.FIXED:
+    # Direct transform following with offset
+    custom_transform = attractor.global_transform * attachment_offset
+    custom_linear_velocity = Vector3.ZERO
+    custom_angular_velocity = Vector3.ZERO
+  else:
+    _apply_spring_attachment_physics(delta)
 
 func _apply_spring_attachment_physics(delta: float) -> void:
-  ## Applies spring-based attachment physics with smooth following.
   if attractors.is_empty():
     return
 
@@ -198,14 +178,8 @@ func _apply_spring_attachment_physics(delta: float) -> void:
   var attractor_basis = attractor.global_transform.basis
   var local_displacement = attractor_basis.inverse() * (target_pos - current_pos)
 
-  # Apply 3D spring forces in attractor's local space
-  var local_spring_accel = Vector3(
-    local_displacement.x * spring_constant.x / mass,
-    local_displacement.y * spring_constant.y / mass,
-    local_displacement.z * spring_constant.z / mass
-  )
-
-  # Add integral term to reduce steady-state error (anti-jitter)
+  # Apply 3D spring forces with integral term
+  var local_spring_accel = _calculate_spring_acceleration(local_displacement)
   position_error_integral += local_displacement * delta
   var local_integral_accel = position_error_integral * 0.1  # Small integral gain
 
@@ -217,7 +191,6 @@ func _apply_spring_attachment_physics(delta: float) -> void:
   _apply_angular_spring(delta)
 
 func _update_attachment_state(delta: float) -> void:
-  ## Updates the attachment state based on proximity and alignment thresholds.
   if not enable_attachment or attractors.is_empty() or is_attached:
     return
 
@@ -250,18 +223,13 @@ func _update_attachment_state(delta: float) -> void:
 
     if snap_to_perfect_alignment:
       # SNAP TO PERFECT ALIGNMENT
-      # Calculate offset that ensures perfect alignment with attractor
       var perfect_transform = Transform3D(_get_target_rotation_basis(), attractor.global_position)
       attachment_offset = attractor.global_transform.affine_inverse() * perfect_transform
     else:
       # KEEP CURRENT OFFSET (original behavior)
       attachment_offset = attractor.global_transform.affine_inverse() * custom_transform
 
-    # Reset velocities when attaching
-    custom_linear_velocity = Vector3.ZERO
-    custom_angular_velocity = Vector3.ZERO
-    position_error_integral = Vector3.ZERO
-    rotation_error_integral = Vector3.ZERO
+    _reset_physics_state()
 
     # Emit signal when attached
     interaction.emit(self, "attached")
@@ -271,8 +239,6 @@ func _update_attachment_state(delta: float) -> void:
     attachment_timer = 0.0
 
 func _get_rotation_angle_difference(basis1: Basis, basis2: Basis) -> float:
-  ## Calculates the rotation angle difference between two basis matrices.
-  ## Returns: Angle difference in radians
   var rotation_diff = basis1.inverse() * basis2
   var rotation_quat = rotation_diff.get_rotation_quaternion()
   var angle = rotation_quat.get_angle()
@@ -284,30 +250,13 @@ func _get_rotation_angle_difference(basis1: Basis, basis2: Basis) -> float:
   return angle
 
 func _custom_integrate_forces(delta: float) -> void:
-  ## Custom physics integration for forces and velocities.
   # Apply gravity
   var gravity = get_gravity()
   custom_linear_velocity += gravity * delta
 
   # Apply per-axis damping in attractor's local space
   if attractors.size() > 0 and not is_attached:
-    var attractor_basis = attractors[0].global_transform.basis
-    var local_linear_vel = attractor_basis.inverse() * custom_linear_velocity
-
-    local_linear_vel.x *= max(0.0, 1.0 - linear_damping_per_axis.x * delta)
-    local_linear_vel.y *= max(0.0, 1.0 - linear_damping_per_axis.y * delta)
-    local_linear_vel.z *= max(0.0, 1.0 - linear_damping_per_axis.z * delta)
-
-    custom_linear_velocity = attractor_basis * local_linear_vel
-
-    # Apply per-axis angular damping in attractor's local space
-    var local_angular_vel = attractor_basis.inverse() * custom_angular_velocity
-
-    local_angular_vel.x *= max(0.0, 1.0 - angular_damping_per_axis.x * delta)
-    local_angular_vel.y *= max(0.0, 1.0 - angular_damping_per_axis.y * delta)
-    local_angular_vel.z *= max(0.0, 1.0 - angular_damping_per_axis.z * delta)
-
-    custom_angular_velocity = attractor_basis * local_angular_vel
+    _apply_per_axis_damping(delta)
 
   # Integrate position
   custom_transform.origin += custom_linear_velocity * delta
@@ -322,9 +271,38 @@ func _custom_integrate_forces(delta: float) -> void:
     rotation_quat = angular_quat * rotation_quat
     custom_transform.basis = Basis(rotation_quat)
 
+func _apply_per_axis_damping(delta: float) -> void:
+  var attractor_basis = attractors[0].global_transform.basis
+
+  # Apply per-axis linear damping
+  var local_linear_vel = attractor_basis.inverse() * custom_linear_velocity
+  local_linear_vel.x *= max(0.0, 1.0 - linear_damping_per_axis.x * delta)
+  local_linear_vel.y *= max(0.0, 1.0 - linear_damping_per_axis.y * delta)
+  local_linear_vel.z *= max(0.0, 1.0 - linear_damping_per_axis.z * delta)
+  custom_linear_velocity = attractor_basis * local_linear_vel
+
+  # Apply per-axis angular damping
+  var local_angular_vel = attractor_basis.inverse() * custom_angular_velocity
+  local_angular_vel.x *= max(0.0, 1.0 - angular_damping_per_axis.x * delta)
+  local_angular_vel.y *= max(0.0, 1.0 - angular_damping_per_axis.y * delta)
+  local_angular_vel.z *= max(0.0, 1.0 - angular_damping_per_axis.z * delta)
+  custom_angular_velocity = attractor_basis * local_angular_vel
+
+func _apply_spring_physics(delta: float) -> void:
+  if is_attached:
+    return
+
+  if attractors.size() == 1:
+    _apply_single_attractor_physics(delta)
+  elif attractors.size() >= 1 and grab_points.size() >= 1:
+    _apply_multi_point_physics(delta)
+
+  # Always apply angular spring if we have attractors
+  if attractors.size() > 0:
+    _apply_angular_spring(delta)
+
 func _apply_single_attractor_physics(delta: float) -> void:
-  ## Applies physics for single attractor grabbing.
-  if attractors.size() == 0 or is_attached:
+  if attractors.size() == 0:
     return
 
   var attractor = attractors[0]
@@ -335,14 +313,8 @@ func _apply_single_attractor_physics(delta: float) -> void:
   var attractor_basis = attractor.global_transform.basis
   var local_displacement = attractor_basis.inverse() * (target_pos - current_pos)
 
-  # Apply 3D spring forces in attractor's local space
-  var local_spring_accel = Vector3(
-    local_displacement.x * spring_constant.x / mass,
-    local_displacement.y * spring_constant.y / mass,
-    local_displacement.z * spring_constant.z / mass
-  )
-
-  # Add integral term to reduce steady-state error (anti-jitter)
+  # Apply 3D spring forces with integral term
+  var local_spring_accel = _calculate_spring_acceleration(local_displacement)
   position_error_integral += local_displacement * delta
   var local_integral_accel = position_error_integral * 0.1  # Small integral gain
 
@@ -350,18 +322,12 @@ func _apply_single_attractor_physics(delta: float) -> void:
   var global_spring_accel = attractor_basis * (local_spring_accel + local_integral_accel)
   custom_linear_velocity += global_spring_accel * delta
 
-  # Apply angular spring
-  _apply_angular_spring(delta)
-
 func _apply_multi_point_physics(delta: float) -> void:
-  ## Applies physics for multi-point grabbing with multiple attractors.
-  if is_attached:
-    return
-
-  # Apply forces at each grab point
+  # Apply forces at each grab point with weights
   for i in range(min(attractors.size(), grab_points.size())):
     var grab_point = grab_points[i]
     var attractor = attractors[i % attractors.size()]
+    var weight = _get_grab_point_weight(i)
 
     var target_pos = attractor.global_position
     var point_pos = custom_transform * grab_point.position
@@ -370,12 +336,8 @@ func _apply_multi_point_physics(delta: float) -> void:
     var attractor_basis = attractor.global_transform.basis
     var local_displacement = attractor_basis.inverse() * (target_pos - point_pos)
 
-    # 3D spring acceleration for this point in attractor's local space
-    var local_point_accel = Vector3(
-      local_displacement.x * spring_constant.x / mass,
-      local_displacement.y * spring_constant.y / mass,
-      local_displacement.z * spring_constant.z / mass
-    )
+    # 3D spring acceleration with weight
+    var local_point_accel = _calculate_spring_acceleration(local_displacement, weight)
 
     # Convert to global space
     var global_point_accel = attractor_basis * local_point_accel
@@ -388,11 +350,7 @@ func _apply_multi_point_physics(delta: float) -> void:
     var torque = lever_arm.cross(global_point_accel * mass)
     custom_angular_velocity += torque * delta / _get_moment_of_inertia()
 
-  # Apply angular spring
-  _apply_angular_spring(delta)
-
 func _apply_angular_spring(delta: float) -> void:
-  ## Applies angular spring forces for rotation stabilization.
   if attractors.size() == 0 or angular_spring_constant.length_squared() == 0 or is_attached:
     return
 
@@ -428,7 +386,6 @@ func _apply_angular_spring(delta: float) -> void:
     custom_angular_velocity += global_torque * delta / _get_moment_of_inertia()
 
 func _apply_resting_thresholds() -> void:
-  ## Applies resting thresholds to stop small movements.
   # Check if we should come to rest
   if custom_linear_velocity.length() < linear_rest_threshold:
     custom_linear_velocity = Vector3.ZERO
@@ -439,7 +396,6 @@ func _apply_resting_thresholds() -> void:
     rotation_error_integral = Vector3.ZERO  # Reset integral when at rest
 
 func _apply_anti_jitter(delta: float) -> void:
-  ## Applies anti-jitter smoothing to physics calculations.
   if is_attached:
     return
 
@@ -456,8 +412,6 @@ func _apply_anti_jitter(delta: float) -> void:
   custom_transform.basis = Basis(smoothed_quat)
 
 func _get_target_rotation_basis() -> Basis:
-  ## Gets the target rotation basis for alignment.
-  ## Returns: Target rotation basis
   if attractors.size() == 0:
     return custom_transform.basis
 
@@ -471,8 +425,6 @@ func _get_target_rotation_basis() -> Basis:
     return attractor.global_transform.basis
 
 func _get_upright_aligned_basis(attractor_basis: Basis) -> Basis:
-  ## Calculates an upright-aligned basis for orientation preservation.
-  ## Returns: Upright-aligned basis
   var current_basis = custom_transform.basis
 
   # Extract forward direction from attractor
@@ -508,8 +460,6 @@ func _get_upright_aligned_basis(attractor_basis: Basis) -> Basis:
   return new_basis
 
 func _get_moment_of_inertia() -> float:
-  ## Calculates the moment of inertia for torque calculations.
-  ## Returns: Moment of inertia value
   # Simplified moment of inertia calculation
   if grabbable_mesh:
     var aabb = grabbable_mesh.get_aabb()
@@ -519,8 +469,45 @@ func _get_moment_of_inertia() -> float:
     # Fallback if mesh isn't set
     return mass
 
+func _calculate_spring_acceleration(local_displacement: Vector3, weight: float = 1.0) -> Vector3:
+  # Calculate spring acceleration with optional weight
+  return Vector3(
+    local_displacement.x * spring_constant.x * weight / mass,
+    local_displacement.y * spring_constant.y * weight / mass,
+    local_displacement.z * spring_constant.z * weight / mass
+  )
+
+func _normalize_weights() -> void:
+  # Normalize grab point weights
+  if grab_point_weights.is_empty():
+    # If no weights specified, use equal weights
+    _normalized_weights.resize(grab_points.size())
+    for i in grab_points.size():
+      _normalized_weights[i] = 1.0
+  else:
+    # Normalize provided weights
+    var total_weight: float = 0.0
+    for weight in grab_point_weights:
+      total_weight += weight
+
+    _normalized_weights.clear()
+    for weight in grab_point_weights:
+      _normalized_weights.append(weight / total_weight)
+
+func _get_grab_point_weight(index: int) -> float:
+  # Get normalized weight for grab point, with bounds checking
+  if index < _normalized_weights.size():
+    return _normalized_weights[index]
+  return 1.0  # Default weight if out of bounds
+
+func _reset_physics_state() -> void:
+  # Reset physics state to zero
+  custom_linear_velocity = Vector3.ZERO
+  custom_angular_velocity = Vector3.ZERO
+  position_error_integral = Vector3.ZERO
+  rotation_error_integral = Vector3.ZERO
+
 func setup_outline_materials() -> void:
-  ## Sets up outline materials based on the selected outline mode.
   match outline_mode:
     OutlineMode.EDGE_SHADER:
       outline_shader_material = ShaderMaterial.new()
@@ -533,40 +520,31 @@ func setup_outline_materials() -> void:
       outline_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 func setup_physics() -> void:
-  ## Configures physics properties for the grabbable object.
   contact_monitor = true
   max_contacts_reported = 5
   linear_damp = 0.0
   angular_damp = 0.0
 
 func reset_to_initial_state() -> void:
-  ## Resets the object to its initial state and transform.
   drop()
   custom_transform = initial_transform
-  custom_linear_velocity = Vector3.ZERO
-  custom_angular_velocity = Vector3.ZERO
-  position_error_integral = Vector3.ZERO
-  rotation_error_integral = Vector3.ZERO
+  _reset_physics_state()
   PhysicsServer3D.body_set_state(get_rid(), PhysicsServer3D.BODY_STATE_TRANSFORM, initial_transform)
   linear_velocity = Vector3.ZERO
   angular_velocity = Vector3.ZERO
 
 # Public API
 func throw(direction: Vector3) -> void:
-  ## Throws the object in the specified direction.
-  ## direction: Normalized direction vector for the throw
   custom_linear_velocity += direction * throw_strength / mass
   drop()
   interaction.emit(self, "throwed")
 
 func drop() -> void:
-  ## Drops the object, releasing it from grabbed state.
   attractors = []
   is_grabbed = false
   is_attached = false
   attachment_timer = 0.0
-  position_error_integral = Vector3.ZERO
-  rotation_error_integral = Vector3.ZERO
+  _reset_physics_state()
   linear_velocity = custom_linear_velocity
   angular_velocity = custom_angular_velocity
   collision_layer |= collision_layers_on_grab
@@ -574,9 +552,7 @@ func drop() -> void:
   interaction.emit(self, "dropped")
   print("[%s] DROPPED - Manual detachment" % name)
 
-func grab(target_attractors: Array[Marker3D]) -> void:
-  ## Grabs the object using the specified attractors.
-  ## target_attractors: Array of attractor markers to grab with
+func grab(target_attractors: Array[Node3D]) -> void:
   attractors = target_attractors
   is_grabbed = true
   is_attached = false
@@ -586,8 +562,7 @@ func grab(target_attractors: Array[Marker3D]) -> void:
   custom_transform = global_transform
   custom_linear_velocity = linear_velocity
   custom_angular_velocity = angular_velocity
-  position_error_integral = Vector3.ZERO
-  rotation_error_integral = Vector3.ZERO
+  _reset_physics_state()
   last_position = custom_transform.origin
   last_rotation = custom_transform.basis
 
@@ -597,28 +572,20 @@ func grab(target_attractors: Array[Marker3D]) -> void:
   print("[%s] GRABBED - attractors set: %d, mode: %s" % [name, attractors.size(), attachment_mode])
 
 # Convenience methods
-func grab_single(target: Marker3D) -> void:
-  ## Convenience method to grab with a single attractor.
-  ## target: Single attractor marker to grab with
+func grab_single(target: Node3D) -> void:
   grab([target])
 
-func grab_two_handed(primary: Marker3D, secondary: Marker3D) -> void:
-  ## Convenience method to grab with two hands.
-  ## primary: Primary hand attractor
-  ## secondary: Secondary hand attractor
+func grab_two_handed(primary: Node3D, secondary: Node3D) -> void:
   grab([primary, secondary])
 
 func focus() -> void:
-  ## Focuses on the object, typically showing visual feedback.
   interaction.emit(self, "focused")
 
 func unfocus() -> void:
-  ## Unfocuses the object, removing visual feedback.
   interaction.emit(self, "unfocused")
 
 # Visual effects
 func _apply_outline() -> void:
-  ## Applies outline effect to the grabbable mesh.
   if not outline_on_focus or not grabbable_mesh: return
 
   var material = grabbable_mesh.get_surface_override_material(0)
@@ -637,7 +604,6 @@ func _apply_outline() -> void:
   grabbable_mesh.set_surface_override_material(0, cloned_material)
 
 func _remove_outline() -> void:
-  ## Removes outline effect from the grabbable mesh.
   if not grabbable_mesh: return
 
   var material = grabbable_mesh.get_surface_override_material(0)
@@ -648,7 +614,6 @@ func _remove_outline() -> void:
 
 # Signal handler
 func _on_interaction(grabbable: Grabbable3D, action: String) -> void:
-  ## Handles interaction signals and triggers appropriate responses.
   match action:
     "focused": _apply_outline()
     "unfocused": _remove_outline()
